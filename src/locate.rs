@@ -4,6 +4,7 @@ use swc_ecma_ast::{
     ClassMember, ContentTagContent, ContentTagEnd, ContentTagExpression, ContentTagMember,
     ContentTagStart,
 };
+use swc_ecma_parser::lexer::ScannedContentTag;
 use swc_ecma_visit::{Visit, VisitWith};
 
 #[derive(Default, Debug)]
@@ -105,6 +106,45 @@ impl Visit for LocateContentTagVisitor {
     }
 }
 
+/// Builds an occurrence for a content tag that swc's lexer found without
+/// parsing, in a file the parser could not read. Whether it is a class member
+/// is a guess.
+pub fn scanned_occurrence(src: &str, tag: &ScannedContentTag, is_ascii: bool) -> Occurrence {
+    let range = |start, end| Range::from_offsets(src, start, end, is_ascii);
+    let open = &tag.open;
+    Occurrence {
+        kind: if tag.in_class_body {
+            ContentTagKind::ClassMember
+        } else {
+            ContentTagKind::Expression
+        },
+        tag_name: open.name.clone(),
+        contents: src[open.content_start..tag.end].to_owned(),
+        range: range(open.start, tag.close_end),
+        start_range: range(open.start, open.content_start),
+        content_range: range(open.content_start, tag.end),
+        end_range: range(tag.end, tag.close_end),
+    }
+}
+
+#[cfg(test)]
+impl Occurrence {
+    pub fn tag_name(&self) -> &str {
+        &self.tag_name
+    }
+
+    pub fn contents(&self) -> &str {
+        &self.contents
+    }
+}
+
+#[cfg(test)]
+impl Range {
+    pub fn start_byte(&self) -> usize {
+        self.start_byte
+    }
+}
+
 #[derive(Serialize, Debug, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Occurrence {
@@ -132,8 +172,16 @@ pub struct Range {
 }
 impl Range {
     pub fn new(src: &str, start_pos: BytePos, span: &Span, is_ascii: bool) -> Range {
-        let start_byte = (span.lo - start_pos).0 as usize;
-        let end_byte = (span.hi - start_pos).0 as usize;
+        Self::from_offsets(
+            src,
+            (span.lo - start_pos).0 as usize,
+            (span.hi - start_pos).0 as usize,
+            is_ascii,
+        )
+    }
+
+    /// The range from `start_byte` to `end_byte` in `src`.
+    pub fn from_offsets(src: &str, start_byte: usize, end_byte: usize, is_ascii: bool) -> Range {
         if is_ascii {
             // For ASCII sources, byte/char/utf16 offsets are all identical.
             Range {

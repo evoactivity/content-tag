@@ -23,6 +23,20 @@ interface Parsed {
   endRange: Range;
 }
 
+interface Recovered {
+  templates: Parsed[];
+  /**
+   * Empty when the file parsed. Otherwise the parse error comes first,
+   * followed by any errors from finding the content tags without parsing.
+   */
+  errors: RecoveryError[];
+}
+
+interface RecoveryError {
+  message: string;
+  range: Range;
+}
+
 interface PreprocessorConstructorOptions {
   /**
    * Which content tags to read, and where each one's content ends. Default
@@ -140,4 +154,12 @@ export class Preprocessor {
    * @returns {any}
    */
   parse(src: string, options?: PreprocessorOptions): Parsed[];
+  /**
+   * Finds the content tags in `src` even when it has a syntax error, and does
+   * not throw for one. When the file parses, `templates` is the same as
+   * `parse` gives and `errors` is empty. When it does not, the templates are
+   * found without parsing: their ranges and contents are the same, but
+   * `type` is a guess.
+   */
+  parseWithRecovery(src: string, options?: PreprocessorOptions): Recovered;
 }

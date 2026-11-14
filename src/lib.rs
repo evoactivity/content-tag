@@ -1,15 +1,17 @@
 #![feature(box_patterns)]
 
 use base64::{engine::general_purpose, Engine as _};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use swc_common::comments::SingleThreadedComments;
 use swc_common::source_map::SourceMapGenConfig;
-use swc_common::{self, sync::Lrc, FileName, Mark, SourceFile, SourceMap};
+use swc_common::{self, sync::Lrc, FileName, Mark, SourceFile, SourceMap, Span, Spanned};
 use swc_core::common::GLOBALS;
 use swc_ecma_ast::{ImportSpecifier, Module, ModuleDecl, ModuleItem};
 use swc_ecma_codegen::Emitter;
+use swc_ecma_parser::lexer::scan_content_tags;
 pub use swc_ecma_parser::lexer::{
     find_first_closing_tag, ContentTagError, ContentTagParser, OpenTag,
 };
@@ -58,6 +60,22 @@ impl From<ParseError> for swc_ecma_parser::error::Error {
     fn from(err: ParseError) -> Self {
         err.error
     }
+}
+
+/// What [Preprocessor::parse_with_recovery] found.
+#[derive(Debug, Serialize)]
+pub struct Recovered {
+    pub templates: Vec<locate::Occurrence>,
+    /// Empty when the file parsed. Otherwise the parse error comes first,
+    /// followed by any errors from finding the content tags without parsing.
+    pub errors: Vec<RecoveryError>,
+}
+
+/// An error found by [Preprocessor::parse_with_recovery].
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct RecoveryError {
+    pub message: String,
+    pub range: locate::Range,
 }
 
 /// The settings for [Preprocessor::with_config].
@@ -261,6 +279,67 @@ impl Preprocessor {
 
             Ok(visitor.occurrences)
         })
+    }
+
+    /// Finds the content tags in `src` even when it has a syntax error, and
+    /// never fails.
+    ///
+    /// When `src` parses, this gives the same templates as [Self::parse] and
+    /// no errors. When it does not, the parser has no syntax tree to give, so
+    /// the content tags are found with swc's lexer alone. Those templates
+    /// have the same ranges and contents, but whether each one is a class
+    /// member is a guess, and a regex in an unusual place can be misread.
+    pub fn parse_with_recovery(&self, src: &str, options: Options) -> Recovered {
+        let parse_error = match self.parse(src, options) {
+            Ok(templates) => {
+                return Recovered {
+                    templates,
+                    errors: vec![],
+                }
+            }
+            Err(err) => err,
+        };
+        let is_ascii = src.is_ascii();
+        let error_range = |source_map: &SourceMap, span: Span| {
+            let start = source_map.lookup_byte_offset(span.lo).pos.0 as usize;
+            let end = source_map.lookup_byte_offset(span.hi).pos.0 as usize;
+            locate::Range::from_offsets(src, start.min(src.len()), end.min(src.len()), is_ascii)
+        };
+        let mut errors = vec![RecoveryError {
+            message: parse_error.error.kind().msg().into_owned(),
+            range: error_range(&parse_error.source_map, parse_error.error.span()),
+        }];
+
+        let source_map: Lrc<SourceMap> = Default::default();
+        let source_file = new_source_file(&source_map, src, None);
+        let scan = GLOBALS.set(&Default::default(), || {
+            scan_content_tags(
+                Syntax::Typescript(TsSyntax {
+                    decorators: true,
+                    ..Default::default()
+                }),
+                StringInput::from(&*source_file),
+                &*self.parser,
+            )
+        });
+        for error in scan.errors {
+            let error = RecoveryError {
+                message: error.kind().msg().into_owned(),
+                range: error_range(&source_map, error.span()),
+            };
+            if !errors.contains(&error) {
+                errors.push(error);
+            }
+        }
+
+        Recovered {
+            templates: scan
+                .tags
+                .iter()
+                .map(|tag| locate::scanned_occurrence(src, tag, is_ascii))
+                .collect(),
+            errors,
+        }
     }
 
     pub fn process(&self, src: &str, options: Options) -> Result<CodeMapPair, ParseError> {
@@ -1032,4 +1111,104 @@ fn reused_preprocessor_reports_errors_in_the_right_file() {
             .span_to_string(swc_common::Spanned::span(&err.error)),
         "<anon>:1:9: 1:10"
     );
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    fn contents(recovered: &Recovered) -> Vec<(&str, &str)> {
+        recovered
+            .templates
+            .iter()
+            .map(|template| (template.tag_name(), template.contents()))
+            .collect()
+    }
+
+    #[test]
+    fn a_file_that_parses_gives_the_same_templates_as_parse() {
+        let p = Preprocessor::new();
+        let src = "class A { <template>a</template> }\nlet x = <template>b</template>;";
+        let recovered = p.parse_with_recovery(src, Default::default());
+        assert_eq!(
+            recovered.templates,
+            p.parse(src, Default::default()).unwrap()
+        );
+        assert!(recovered.errors.is_empty());
+    }
+
+    #[test]
+    fn finds_templates_around_a_syntax_error() {
+        let p = Preprocessor::new();
+        let src =
+            "const T = <template>hi</template>;\nconst a =;\nconst U = <template>yo</template>;";
+        let recovered = p.parse_with_recovery(src, Default::default());
+        assert_eq!(
+            contents(&recovered),
+            [("template", "hi"), ("template", "yo")]
+        );
+        // The parse error points at the `;` after `=`.
+        let error = &recovered.errors[0];
+        assert_eq!(error.range.start_byte(), src.find("=;").unwrap() + 1);
+    }
+
+    #[test]
+    fn recovered_templates_have_the_same_ranges_as_parsed_ones() {
+        let p = Preprocessor::new();
+        let valid = "let ü = '💩';\nclass A { <template>💩</template> }";
+        let broken = format!("{valid}\nconst a =;");
+        let parsed = p.parse(valid, Default::default()).unwrap();
+        let recovered = p.parse_with_recovery(&broken, Default::default());
+        assert!(!recovered.errors.is_empty());
+        assert_eq!(recovered.templates, parsed);
+    }
+
+    #[test]
+    fn guesses_whether_a_template_is_a_class_member() {
+        let p = Preprocessor::new();
+        let src = "class A { <template>member</template> }\nlet x = <template>expression</template>;\nfoo(";
+        let recovered = p.parse_with_recovery(src, Default::default());
+        let parsed = p
+            .parse(
+                "class A { <template>member</template> }\nlet x = <template>expression</template>;",
+                Default::default(),
+            )
+            .unwrap();
+        assert_eq!(recovered.templates, parsed);
+    }
+
+    #[test]
+    fn ignores_templates_in_regexes_and_template_literals() {
+        let p = Preprocessor::new();
+        let src = "const r = /<template>no<\\/template>/;\nconst s = `${a}<template>no</template>`;\nconst T = <template>hi</template>;\nfoo(";
+        let recovered = p.parse_with_recovery(src, Default::default());
+        assert_eq!(contents(&recovered), [("template", "hi")]);
+    }
+
+    #[test]
+    fn uses_the_parser_to_find_where_content_ends() {
+        let p = Preprocessor::with_config(Config {
+            parser: Some(Box::new(LastClosingTag(vec!["template".into()]))),
+            output: None,
+        })
+        .unwrap();
+        let src = "let x = <template><template>a</template></template>;\nconst a =;";
+        let recovered = p.parse_with_recovery(src, Default::default());
+        assert_eq!(
+            contents(&recovered),
+            [("template", "<template>a</template>")]
+        );
+    }
+
+    #[test]
+    fn errors_come_in_order_with_the_parse_error_first() {
+        let p = Preprocessor::new();
+        let src = "const a =;\nlet x = <template>no closing tag";
+        let recovered = p.parse_with_recovery(src, Default::default());
+        assert!(recovered.templates.is_empty());
+        assert!(recovered.errors.len() >= 2, "{:?}", recovered.errors);
+        assert!(recovered.errors[1..].iter().any(|error| error
+            .message
+            .contains("The closing `</template>` tag is missing")));
+    }
 }

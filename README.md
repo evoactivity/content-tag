@@ -211,6 +211,42 @@ let p = new Preprocessor();
 let output = p.parse("<template>Hi</template>");
 ```
 
+### `Preprocessor.parseWithRecovery(src: string, options?: PreprocessorOptions): Recovered;`
+
+Like `parse`, but it also finds the content tags in a file that has a syntax
+error, and does not throw for one. This is for tools such as editors, which
+see files while they are being typed.
+
+```ts
+let p = new Preprocessor();
+let { templates, errors } = p.parseWithRecovery(
+  "const T = <template>Hi</template>;\nconst a =;",
+);
+// templates: one `Parsed`, for "Hi"
+// errors: [{ message, range }] for the syntax error
+```
+
+```ts
+interface Recovered {
+  templates: Parsed[];
+  /** Empty when the file parsed. The parse error comes first. */
+  errors: { message: string; range: Range }[];
+}
+```
+
+When the file parses, `templates` is the same as `parse` gives. When it does
+not, swc's parser gives no syntax tree, so the content tags are found with
+swc's lexer alone, using the same parser and `findEnd`. Those templates have
+the same ranges and contents, with two limits:
+
+- `type` is a guess. A content tag directly inside the body of a `class` is
+  reported as `"class-member"`, and any other as `"expression"`.
+- A regex in an unusual place, such as straight after a `}`, can be read as a
+  division, so its content is read as code.
+
+When `findEnd` throws or gives a bad index, the content tag ends at its first
+closing tag instead, and the error is added to `errors`.
+
 #### `PreprocessorOptions`
 
 ```ts

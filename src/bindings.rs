@@ -391,6 +391,21 @@ impl Preprocessor {
         }
     }
 
+    /// Returns `{ templates, errors }`, and does not throw for a syntax
+    /// error. When the file has one, the templates are found without
+    /// parsing it.
+    #[wasm_bindgen(js_name = parseWithRecovery)]
+    pub fn parse_with_recovery(&self, src: JsString, options: JsValue) -> Result<JsValue, JsValue> {
+        let options = Options::new(options);
+        let recovered = self.with_source(&src, |core, src| core.parse_with_recovery(src, options));
+        match serde_json::to_string(&recovered) {
+            Ok(serialized) => Ok(json_parse(serialized.into())),
+            Err(err) => Err(js_error(
+                format!("Unexpected serialization error; please open an issue with the following debug info: {err:#?}").into(),
+            )),
+        }
+    }
+
     pub fn parse(&self, src: JsString, options: JsValue) -> Result<JsValue, JsValue> {
         let options = Options::new(options);
         let result = self.with_source(&src, |core, src| core.parse(src, options));
