@@ -43,7 +43,7 @@ impl LocateContentTagVisitor {
     ) {
         let occurrence = Occurrence {
             kind,
-            tag_name: "template".to_owned(),
+            tag_name: self.tag_name(opening.span),
             contents: contents.value.to_string(),
             range: Range::new(&self.src, self.start_pos, span, self.is_ascii),
             start_range: Range::new(&self.src, self.start_pos, &opening.span, self.is_ascii),
@@ -52,6 +52,16 @@ impl LocateContentTagVisitor {
         };
 
         self.occurrences.push(occurrence);
+    }
+}
+
+impl LocateContentTagVisitor {
+    // The syntax tree does not record a content tag's name, so it is read
+    // from its opening tag, `<name>`.
+    fn tag_name(&self, opening: Span) -> String {
+        let start = (opening.lo - self.start_pos).0 as usize;
+        let end = (opening.hi - self.start_pos).0 as usize;
+        self.src[start + 1..end - 1].to_owned()
     }
 }
 
@@ -522,6 +532,141 @@ fn test_inner_expression() {
             },
             tag_name: "template".into(),
             kind: ContentTagKind::Expression
+        }]
+    );
+}
+
+// For an ASCII source, every kind of offset in a range is the same.
+#[cfg(test)]
+fn ascii_range(start: usize, end: usize) -> Range {
+    Range {
+        start_byte: start,
+        end_byte: end,
+        start_char: start,
+        end_char: end,
+        start_utf16_codepoint: start,
+        end_utf16_codepoint: end,
+    }
+}
+
+// A preprocessor that reads `tags`, with no output.
+#[cfg(test)]
+fn reading(tags: &[&str]) -> Preprocessor {
+    Preprocessor::with_config(crate::Config {
+        parser: Some(Box::new(crate::TagNames::new(tags.iter().copied()))),
+        output: None,
+    })
+    .unwrap()
+}
+
+#[test]
+fn test_custom_tag_name() {
+    let p = reading(&["jsx"]);
+    let output = p.parse("<jsx>hi</jsx>", Default::default()).unwrap();
+    assert_eq!(
+        output,
+        vec![Occurrence {
+            kind: ContentTagKind::Expression,
+            tag_name: "jsx".into(),
+            contents: "hi".into(),
+            range: ascii_range(0, 13),
+            start_range: ascii_range(0, 5),
+            content_range: ascii_range(5, 7),
+            end_range: ascii_range(7, 13),
+        }]
+    );
+}
+
+#[test]
+fn test_custom_tag_name_ignores_template() {
+    let p = reading(&["jsx"]);
+    let output = p.parse("let x = <template>hi</template>", Default::default());
+    assert!(
+        output.map_or(true, |occurrences| occurrences.is_empty()),
+        "<template> should not be read as a content tag"
+    );
+}
+
+#[test]
+fn test_default_tag_name_ignores_other_tags() {
+    let p = Preprocessor::new();
+    let output = p.parse("let x = <jsx>hi</jsx>", Default::default());
+    assert!(
+        output.map_or(true, |occurrences| occurrences.is_empty()),
+        "<jsx> should not be read as a content tag"
+    );
+}
+
+#[test]
+fn test_several_tag_names() {
+    let p = reading(&["template", "style"]);
+    let output = p
+        .parse(
+            "let a = <template>x</template>;\nlet b = <style>y</style>;",
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        output
+            .iter()
+            .map(|o| (o.tag_name.as_str(), o.contents.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("template", "x"), ("style", "y")]
+    );
+}
+
+#[test]
+fn test_default_parser_ends_at_the_first_closing_tag() {
+    let p = Preprocessor::new();
+    let output = p
+        .parse(
+            "class A { <template><template>a</template></template> }",
+            Default::default(),
+        )
+        .map(|occurrences| occurrences[0].contents.clone());
+    assert_eq!(output.ok(), None, "the second closing tag is a parse error");
+}
+
+// Ends each content tag at its last closing tag in the file.
+#[cfg(test)]
+struct LastClosingTag(Vec<String>);
+
+#[cfg(test)]
+impl crate::ContentTagParser for LastClosingTag {
+    fn tags(&self) -> &[String] {
+        &self.0
+    }
+
+    fn find_end(
+        &self,
+        source: &str,
+        open: &crate::OpenTag,
+    ) -> Result<usize, crate::ContentTagError> {
+        source
+            .rfind(&format!("</{}>", open.name))
+            .ok_or_else(|| crate::ContentTagError::new(open.content_start, "no closing tag"))
+    }
+}
+
+#[test]
+fn test_parser_decides_where_the_content_ends() {
+    let p = Preprocessor::with_config(crate::Config {
+        parser: Some(Box::new(LastClosingTag(vec!["template".into()]))),
+        output: None,
+    })
+    .unwrap();
+    let src = r#"class A { <template><table><template id="row"><tr></tr></template></table></template> }"#;
+    let output = p.parse(src, Default::default()).unwrap();
+    assert_eq!(
+        output,
+        vec![Occurrence {
+            kind: ContentTagKind::ClassMember,
+            tag_name: "template".into(),
+            contents: r#"<table><template id="row"><tr></tr></template></table>"#.into(),
+            range: ascii_range(10, 85),
+            start_range: ascii_range(10, 20),
+            content_range: ascii_range(20, 74),
+            end_range: ascii_range(74, 85),
         }]
     );
 }

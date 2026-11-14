@@ -5,13 +5,20 @@ use swc_ecma_codegen::Emitter;
 use swc_ecma_parser::TsSyntax;
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
+use crate::output::RENAME_SUFFIX;
 use crate::Preprocessor;
-use crate::IMPORT_ALIAS;
 
 pub fn testcase(input: &str, expected: &str) -> Result<(), swc_ecma_parser::error::Error> {
-    let p = Preprocessor::new();
+    testcase_with(&Preprocessor::new(), input, expected)
+}
+
+pub fn testcase_with(
+    p: &Preprocessor,
+    input: &str,
+    expected: &str,
+) -> Result<(), swc_ecma_parser::error::Error> {
     let actual = p.process(input, Default::default())?;
-    let actual_santized = actual.code.replace(IMPORT_ALIAS, "template_UUID");
+    let actual_santized = actual.code.replace(&format!("_{RENAME_SUFFIX}"), "_UUID");
     let normalized_expected = normalize(expected);
     if actual_santized != normalized_expected {
         panic!(
