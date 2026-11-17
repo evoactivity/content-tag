@@ -10,7 +10,7 @@ use serde::Serialize;
 use swc_common::{sync::Lrc, BytePos, LineCol, SourceMap};
 
 use crate::locate::{Occurrence, Range};
-use crate::output::RENAME_SUFFIX;
+use crate::RENAME_SUFFIX;
 use crate::{
     encode_inline_source_map, new_source_file, Options, ParseError, Preprocessor, RecoveryError,
     SourceMapConfig,

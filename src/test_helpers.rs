@@ -5,8 +5,8 @@ use swc_ecma_codegen::Emitter;
 use swc_ecma_parser::TsSyntax;
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
-use crate::output::RENAME_SUFFIX;
 use crate::Preprocessor;
+use crate::RENAME_SUFFIX;
 
 pub fn testcase(input: &str, expected: &str) -> Result<(), swc_ecma_parser::error::Error> {
     testcase_with(&Preprocessor::new(), input, expected)

@@ -58,17 +58,15 @@ expects.
 
 ```ts
 interface PreprocessorConstructorOptions {
-  /** Which content tags to read. Default is `{ tags: ["template"] }`. */
-  parser?: ContentTagParser;
-  /** The output for each tag name. Default is the Ember output for `template`. */
-  output?: Record<string, PreprocessorOutput>;
+  /** The content tags to read, by name. Default is `{ template: {} }`. */
+  tags?: Record<string, TagOptions>;
 }
 
-interface ContentTagParser {
-  /** The tag names to read. An opening tag must be exactly `<name>`. */
-  tags: string[];
+interface TagOptions {
   /** Returns the index of the closing tag's `<`. Default is the first closing tag. */
   findEnd?(source: string, openTag: OpenTag): number;
+  /** Returns the code that `process` writes in place of the tag. */
+  transform?(tag: Parsed, context: TransformContext): string;
 }
 
 interface OpenTag {
@@ -79,43 +77,38 @@ interface OpenTag {
   contentStart: number;
 }
 
-interface PreprocessorOutput {
-  /** Import declarations to add. Can be an empty string. */
-  import: string;
-  /** Replaces a content tag in an expression position. */
-  expression: string;
-  /** Replaces a content tag in a class body. An empty string removes it. Default is `static { <expression>; }`. */
-  classMember?: string;
-  /** Remove the indentation that all lines of the content share. Default is `true`. */
-  stripIndent?: boolean;
-  /** Turn a top-level content tag statement into `export default`. Default is `true`. */
-  exportDefault?: boolean;
+interface TransformContext {
+  /** Adds an import and returns the local name to use for it. */
+  import(name: string, from: string): string;
 }
 ```
 
-#### Parser
+#### Tags
 
-A parser says which content tags to read, and where each one's content ends.
-An ecosystem can provide one for its own content language.
+`tags` lists the content tags to read, by name. The opening tag must be
+exactly `<name>`.
 
 ```ts
-let p = new Preprocessor({ parser: { tags: ["template", "style"] } });
+let p = new Preprocessor({ tags: { template: {}, style: {} } });
 p.parse("let a = <template>x</template>; let b = <style>y</style>;");
 // tagName "template" with contents "x", then tagName "style" with contents "y"
 ```
 
+#### `findEnd`
+
 Without `findEnd`, a content tag ends at the first closing tag with its name.
 That is wrong when the content can contain that closing tag, for example
-inside a comment or a nested element. A parser that understands the content's
+inside a comment or a nested element. Code that understands the content's
 language can give the right end with `findEnd`.
 
 ```ts
 let p = new Preprocessor({
-  parser: {
-    tags: ["template"],
-    findEnd(source, openTag) {
-      // Read the content from openTag.contentStart, and return the index of
-      // the `<` of the closing tag.
+  tags: {
+    template: {
+      findEnd(source, openTag) {
+        // Read the content from openTag.contentStart, and return the index of
+        // the `<` of the closing tag.
+      },
     },
   },
 });
@@ -127,82 +120,17 @@ let p = new Preprocessor({
 - To report an error, throw an `Error`. If it has a numeric `offset`, the
   parse error points at that index. If its `code` is `"missing-closing-tag"`,
   the parse error points at the opening tag.
-- One preprocessor uses one parser. A parser can list several tags.
 
-#### Custom output
+#### `transform`
 
-By default, `process` writes the code that Ember expects for `<template>`.
-Pass `output` to write code for a different compiler. It has an output for
-each tag name the parser lists. An output must have `import` and
-`expression`.
-
-```ts
-let p = new Preprocessor({
-  parser: { tags: ["jsx"] },
-  output: {
-    jsx: {
-      import: 'import compiler from "thing";',
-      expression: "compiler(`___CT_CONTENT___`)",
-      classMember: "static template = compiler(`___CT_CONTENT___`);",
-    },
-  },
-});
-p.process("let x = <jsx>Hi</jsx>").code;
-// import compiler_fd9b2463e5f141cfb5666b64daa1f11a from "thing";
-// let x = compiler_fd9b2463e5f141cfb5666b64daa1f11a(`Hi`);
-```
-
-Each `___CT_CONTENT___` in `expression` and `classMember` is replaced with the
-content of the tag. How it is written decides what replaces it:
-
-| Written as                                     | Replaced with                            |
-| ---------------------------------------------- | ---------------------------------------- |
-| `` `___CT_CONTENT___` ``                       | the content as a template literal        |
-| `"___CT_CONTENT___"` or `'___CT_CONTENT___'`   | the content as a string literal          |
-| `___CT_CONTENT___`                             | the content, read as JavaScript code     |
-
-- `___CT_CONTENT___` can be used any number of times, including none.
-- Content read as code must be a single JavaScript expression. If it is not,
-  `process` throws a parse error that points at the content.
-- An empty `classMember` removes content tags from class bodies.
-- The names bound by `import` are renamed so they cannot clash with names in
-  the file. Uses of those names in `expression` and `classMember` are renamed
-  to match.
-- A file gets the imports of the tags it contains. An import that several
-  outputs share is added once. Two outputs must not import different things
-  with the same name.
-- `process` throws when it reaches a tag that has no output. `parse` does not
-  need an output.
-- The snippets are checked when the `Preprocessor` is created, and the
-  constructor throws if one is invalid.
-
-The default output is the same as passing:
-
-```ts
-output: {
-  template: {
-    import: 'import { template } from "@ember/template-compiler";',
-    expression: "template(`___CT_CONTENT___`, { eval() { return eval(arguments[0]); } })",
-    classMember: "static { template(`___CT_CONTENT___`, { component: this, eval() { return eval(arguments[0]); } }); }",
-    stripIndent: true,
-    exportDefault: true,
-  },
-}
-```
-
-#### Tags
-
-`tags` lists the content tags by name. Each one can have a `findEnd`, as
-described under Parser, and a `transform`. It cannot be used with `parser` or
-`output`.
+By default, `process` writes the code that Ember expects for `<template>`, and
+throws for a tag with another name. Give a tag a `transform` to write other
+code.
 
 ```js
 const p = new Preprocessor({
   tags: {
     template: {
-      findEnd(source, openTag) {
-        return source.indexOf(`</${openTag.name}>`, openTag.contentStart);
-      },
       transform(tag, context) {
         const template = context.import("template", "@ember/template-compiler");
         return `${template}(${JSON.stringify(tag.contents)})`;
@@ -227,8 +155,7 @@ body.
   the file, once, and returns the local name to use. The local name has a
   suffix so it cannot clash with a name in the file. A `name` of `"default"`
   is the default export. A file with no content tags gets no imports.
-- When any tag has a `transform`, every tag needs one. With no `transform` at
-  all, `process` writes the Ember output for `template`.
+- When any tag has a `transform`, every tag needs one.
 - `process` also returns `tags`, the tags it replaced with an `outputRange`
   that says where each replacement is in `code`, and `errors`.
 - With the `recover` option, `process` does not throw for a syntax error. It
@@ -299,7 +226,7 @@ Each error has a `kind`:
 
 When the file parses, `templates` is the same as `parse` gives. When it does
 not, swc's parser gives no syntax tree, so the content tags are found with
-swc's lexer alone, using the same parser and `findEnd`. Those templates have
+swc's lexer alone, using the same tags and `findEnd`. Those templates have
 the same ranges and contents, with two limits:
 
 - `type` is a guess. A content tag directly inside the body of a `class` is

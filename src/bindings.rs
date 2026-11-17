@@ -1,8 +1,8 @@
 use crate::{
     find_first_closing_tag, Config, ContentTagError, ContentTagParser, Imports, Occurrence,
-    OpenTag, Options, Output, Preprocessor as CorePreprocessor, SpliceError,
+    OpenTag, Options, Preprocessor as CorePreprocessor, SpliceError,
 };
-use js_sys::{Array, Function, JsString, Object, Reflect};
+use js_sys::{Function, JsString, Object, Reflect};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -140,52 +140,14 @@ fn constructor_options(options: &JsValue) -> Result<ConstructorOptions, JsValue>
     }
 
     let tags = Reflect::get(options, &"tags".into())?;
-    let parser = Reflect::get(options, &"parser".into())?;
-    let output = Reflect::get(options, &"output".into())?;
-    if !tags.is_undefined() {
-        if !parser.is_undefined() || !output.is_undefined() {
-            return Err(js_type_error(
-                "The Preprocessor `tags` option cannot be used with `parser` or `output`".into(),
-            ));
-        }
-        return tags_option(&tags);
+    if tags.is_undefined() {
+        return Ok(ConstructorOptions {
+            config: Config::default(),
+            js_parser: None,
+            transforms: HashMap::new(),
+        });
     }
-
-    let js_parser = if parser.is_undefined() {
-        None
-    } else {
-        Some(Rc::new(JsParser::new(&parser)?))
-    };
-
-    let output = if output.is_undefined() {
-        None
-    } else {
-        if !output.is_object() {
-            return Err(js_type_error(
-                "The Preprocessor `output` option must be an object with an output for each tag"
-                    .into(),
-            ));
-        }
-        let mut outputs = vec![];
-        for tag in Object::keys(output.unchecked_ref::<Object>()).iter() {
-            let tag = js_string(&tag);
-            let value = Reflect::get(&output, &tag.as_str().into())?;
-            outputs.push((tag.clone(), read_output(&value, &format!("output.{tag}"))?));
-        }
-        Some(outputs)
-    };
-
-    let config = Config {
-        parser: js_parser
-            .clone()
-            .map(|parser| Box::new(SharedJsParser(parser)) as Box<dyn ContentTagParser>),
-        output,
-    };
-    Ok(ConstructorOptions {
-        config,
-        js_parser,
-        transforms: HashMap::new(),
-    })
+    tags_option(&tags)
 }
 
 /// Reads the `tags` option, which is `{ [name]: { findEnd?, transform? } }`.
@@ -236,12 +198,6 @@ fn tags_option(tags: &JsValue) -> Result<ConstructorOptions, JsValue> {
     Ok(ConstructorOptions {
         config: Config {
             parser: Some(Box::new(SharedJsParser(js_parser.clone()))),
-            // With a transform for every tag, `process` uses no output.
-            output: if transforms.is_empty() {
-                None
-            } else {
-                Some(vec![])
-            },
         },
         js_parser: Some(js_parser),
         transforms,
@@ -262,23 +218,6 @@ fn optional_function(
     })
 }
 
-fn read_output(output: &JsValue, option: &str) -> Result<Output, JsValue> {
-    if !output.is_object() {
-        return Err(js_type_error(
-            format!("The Preprocessor `{option}` option must be an object").into(),
-        ));
-    }
-    Ok(Output {
-        import: required_string(output, "import", &format!("{option}.import"))?,
-        expression: required_string(output, "expression", &format!("{option}.expression"))?,
-        class_member: optional_string(output, "classMember", &format!("{option}.classMember"))?,
-        strip_indent: optional_bool(output, "stripIndent", &format!("{option}.stripIndent"))?
-            .unwrap_or(true),
-        export_default: optional_bool(output, "exportDefault", &format!("{option}.exportDefault"))?
-            .unwrap_or(true),
-    })
-}
-
 /// A content tag parser given from JavaScript.
 struct JsParser {
     tags: Vec<String>,
@@ -287,51 +226,6 @@ struct JsParser {
     // The JavaScript string of the current `parse` or `process` call, so
     // `findEnd` is given that string instead of a copy of it.
     source: RefCell<Option<JsValue>>,
-}
-
-impl JsParser {
-    fn new(parser: &JsValue) -> Result<Self, JsValue> {
-        if !parser.is_object() {
-            return Err(js_type_error(
-                "The Preprocessor `parser` option must be an object".into(),
-            ));
-        }
-        let tags = Reflect::get(parser, &"tags".into())?;
-        if !Array::is_array(&tags) {
-            return Err(js_type_error(
-                "The Preprocessor `parser.tags` option must be an array of strings".into(),
-            ));
-        }
-        let tags = Array::from(&tags)
-            .iter()
-            .map(|tag| {
-                tag.as_string().ok_or_else(|| {
-                    js_type_error(
-                        "The Preprocessor `parser.tags` option must be an array of strings".into(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let find_end = match Reflect::get(parser, &"findEnd".into())? {
-            find_end if find_end.is_undefined() => None,
-            find_end => Some(find_end.dyn_into::<Function>().map_err(|_| {
-                js_type_error("The Preprocessor `parser.findEnd` option must be a function".into())
-            })?),
-        };
-        // The `parser` option has one `findEnd` for all of its tags.
-        let find_end = match find_end {
-            Some(find_end) => tags
-                .iter()
-                .map(|tag| (tag.clone(), find_end.clone()))
-                .collect(),
-            None => HashMap::new(),
-        };
-        Ok(Self {
-            tags,
-            find_end,
-            source: RefCell::new(None),
-        })
-    }
 }
 
 impl ContentTagParser for JsParser {
@@ -432,40 +326,6 @@ fn utf16_to_byte(source: &str, index: usize) -> Option<usize> {
         utf16 += c.len_utf16();
     }
     (utf16 == index).then_some(source.len())
-}
-
-fn optional_string(object: &JsValue, key: &str, option: &str) -> Result<Option<String>, JsValue> {
-    let value = Reflect::get(object, &key.into())?;
-    if value.is_undefined() {
-        return Ok(None);
-    }
-    match value.as_string() {
-        Some(value) => Ok(Some(value)),
-        None => Err(js_type_error(
-            format!("The Preprocessor `{option}` option must be a string").into(),
-        )),
-    }
-}
-
-fn required_string(object: &JsValue, key: &str, option: &str) -> Result<String, JsValue> {
-    optional_string(object, key, option)?.ok_or_else(|| {
-        js_type_error(
-            format!("The Preprocessor `{option}` option is required when `output` is given").into(),
-        )
-    })
-}
-
-fn optional_bool(object: &JsValue, key: &str, option: &str) -> Result<Option<bool>, JsValue> {
-    let value = Reflect::get(object, &key.into())?;
-    if value.is_undefined() {
-        return Ok(None);
-    }
-    match value.as_bool() {
-        Some(value) => Ok(Some(value)),
-        None => Err(js_type_error(
-            format!("The Preprocessor `{option}` option must be a boolean").into(),
-        )),
-    }
 }
 
 impl Preprocessor {

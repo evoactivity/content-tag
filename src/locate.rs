@@ -616,7 +616,6 @@ fn ascii_range(start: usize, end: usize) -> Range {
 fn reading(tags: &[&str]) -> Preprocessor {
     Preprocessor::with_config(crate::Config {
         parser: Some(Box::new(crate::TagNames::new(tags.iter().copied()))),
-        output: None,
     })
     .unwrap()
 }
@@ -714,7 +713,6 @@ impl crate::ContentTagParser for LastClosingTag {
 fn test_parser_decides_where_the_content_ends() {
     let p = Preprocessor::with_config(crate::Config {
         parser: Some(Box::new(LastClosingTag(vec!["template".into()]))),
-        output: None,
     })
     .unwrap();
     let src = r#"class A { <template><table><template id="row"><tr></tr></template></table></template> }"#;

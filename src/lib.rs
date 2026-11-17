@@ -1,15 +1,20 @@
 #![feature(box_patterns)]
 
+#[macro_use]
+extern crate lazy_static;
+
 use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use swc_common::comments::SingleThreadedComments;
 use swc_common::source_map::SourceMapGenConfig;
 use swc_common::{self, sync::Lrc, FileName, Mark, SourceFile, SourceMap, Span, Spanned};
 use swc_core::common::GLOBALS;
-use swc_ecma_ast::{ImportSpecifier, Module, ModuleDecl, ModuleItem};
+use swc_ecma_ast::{
+    Ident, ImportDecl, ImportNamedSpecifier, ImportSpecifier, Module, ModuleDecl, ModuleExportName,
+    ModuleItem,
+};
 use swc_ecma_codegen::Emitter;
 use swc_ecma_parser::lexer::scan_content_tags;
 pub use swc_ecma_parser::lexer::{
@@ -18,17 +23,16 @@ pub use swc_ecma_parser::lexer::{
 use swc_ecma_parser::TsSyntax;
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 use swc_ecma_transforms::resolver;
+use swc_ecma_utils::private_ident;
 use swc_ecma_visit::{VisitMutWith, VisitWith};
 
 mod bindings;
 mod locate;
-mod output;
+mod snippets;
 mod splice;
 mod transform;
 
 pub use locate::Occurrence;
-use output::CompiledOutput;
-pub use output::{InvalidOutput, Output, CONTENT_PLACEHOLDER};
 pub use splice::{Imports, SpliceError, Spliced, SplicedTag};
 
 #[derive(Default)]
@@ -42,8 +46,6 @@ pub struct Options {
 /// source map and comments to itself, and drops them when it returns.
 pub struct Preprocessor {
     parser: Box<dyn ContentTagParser>,
-    // The output for each tag name.
-    outputs: HashMap<String, CompiledOutput>,
 }
 
 /// A parse error, with the source map needed to show where it is.
@@ -121,9 +123,6 @@ pub struct Config {
     /// Which content tags to read, and where each one ends. The default is
     /// [TagNames] with `template`.
     pub parser: Option<Box<dyn ContentTagParser>>,
-    /// The output for each tag name that `process` should replace. The default
-    /// is [Output::ember] for `template`, when the parser reads `template`.
-    pub output: Option<Vec<(String, Output)>>,
 }
 
 /// A [ContentTagParser] that only lists tag names, so each content tag ends at
@@ -149,12 +148,6 @@ pub enum InvalidConfig {
     NoTags,
     /// The parser lists a tag name that is not allowed.
     InvalidTagName(String),
-    /// There is an output for a tag the parser does not list.
-    OutputForUnknownTag(String),
-    /// The output for a tag is not allowed.
-    InvalidOutput { tag: String, error: InvalidOutput },
-    /// Two outputs import different things with the same name.
-    ConflictingImport { name: String },
 }
 
 impl fmt::Display for InvalidConfig {
@@ -164,17 +157,6 @@ impl fmt::Display for InvalidConfig {
             InvalidConfig::InvalidTagName(tag) => write!(
                 f,
                 "Invalid content tag name {tag:?}. A tag name must start with an ASCII letter and contain only ASCII letters, digits and hyphens."
-            ),
-            InvalidConfig::OutputForUnknownTag(tag) => write!(
-                f,
-                "There is an output for `{tag}`, but the parser does not list that tag."
-            ),
-            InvalidConfig::InvalidOutput { tag, error } => {
-                write!(f, "In the output for `{tag}`: {error}")
-            }
-            InvalidConfig::ConflictingImport { name } => write!(
-                f,
-                "Two outputs import different things with the name `{name}`."
             ),
         }
     }
@@ -197,6 +179,12 @@ pub struct CodeMapPair {
     pub map: String,
 }
 
+/// The end of each local name that is made for an import, so the name cannot
+/// clash with a name in the file.
+pub const RENAME_SUFFIX: &str = "fd9b2463e5f141cfb5666b64daa1f11a";
+
+/// The local name of `template` from `@ember/template-compiler` in the
+/// built-in output.
 pub const IMPORT_ALIAS: &str = "template_fd9b2463e5f141cfb5666b64daa1f11a";
 
 struct SourceMapConfig;
@@ -230,28 +218,7 @@ impl Preprocessor {
             return Err(InvalidConfig::InvalidTagName(tag.clone()));
         }
 
-        let output = config.output.unwrap_or_else(|| {
-            if tags.iter().any(|tag| tag == "template") {
-                vec![("template".to_owned(), Output::ember())]
-            } else {
-                vec![]
-            }
-        });
-        let mut outputs = HashMap::new();
-        for (tag, output) in output {
-            if !tags.contains(&tag) {
-                return Err(InvalidConfig::OutputForUnknownTag(tag));
-            }
-            let compiled =
-                CompiledOutput::new(&output).map_err(|error| InvalidConfig::InvalidOutput {
-                    tag: tag.clone(),
-                    error,
-                })?;
-            outputs.insert(tag, compiled);
-        }
-        check_imports(&outputs)?;
-
-        Ok(Self { parser, outputs })
+        Ok(Self { parser })
     }
 
     /// The tag names this preprocessor reads.
@@ -274,23 +241,6 @@ impl Preprocessor {
             Some(comments),
         )
         .with_content_tag_parser(&*self.parser)
-    }
-
-    // The imports for the tags in `used`, in the order the parser lists the
-    // tags. An import that several outputs share is added once.
-    fn imports(&self, used: &HashSet<String>) -> Vec<ModuleItem> {
-        let mut imports: Vec<ModuleItem> = vec![];
-        for tag in self.parser.tags() {
-            if !used.contains(tag) {
-                continue;
-            }
-            for item in &self.outputs[tag].imports {
-                if !imports.contains(item) {
-                    imports.push(item.clone());
-                }
-            }
-        }
-        imports
     }
 
     pub fn parse(
@@ -377,6 +327,8 @@ impl Preprocessor {
     }
 
     pub fn process(&self, src: &str, options: Options) -> Result<CodeMapPair, ParseError> {
+        let target_specifier = "template";
+        let target_module = "@ember/template-compiler";
         let source_map: Lrc<SourceMap> = Default::default();
         let comments = SingleThreadedComments::default();
         let source_file = new_source_file(&source_map, src, options.filename);
@@ -389,21 +341,22 @@ impl Preprocessor {
         GLOBALS.set(&Default::default(), || {
             let mut parsed_module = parser.parse_module().map_err(parse_error)?;
 
+            let id = private_ident!(IMPORT_ALIAS);
+            let mut needs_import = false;
             let mut transform = transform::TransformVisitor::new(
-                &self.outputs,
-                &*self.parser,
+                &id,
+                Some(&mut needs_import),
                 src,
                 source_file.start_pos,
-                Some(&comments),
             );
             parsed_module.visit_mut_with(&mut transform);
             if let Some(err) = transform.error {
                 return Err(parse_error(err));
             }
 
-            parsed_module
-                .body
-                .splice(0..0, self.imports(&transform.used));
+            if needs_import {
+                insert_import(&mut parsed_module, target_module, target_specifier, &id)
+            }
 
             let unresolved_mark = Mark::new();
             let top_level_mark = Mark::new();
@@ -479,36 +432,31 @@ fn encode_inline_source_map(map: &[u8]) -> String {
     )
 }
 
-// Two outputs may import the same declaration, which is then added once. But
-// they must not import different things with the same name, because both are
-// renamed the same way.
-fn check_imports(outputs: &HashMap<String, CompiledOutput>) -> Result<(), InvalidConfig> {
-    let mut seen: HashMap<String, &ModuleItem> = HashMap::new();
-    for output in outputs.values() {
-        for item in &output.imports {
-            let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
-                continue;
-            };
-            for specifier in &import.specifiers {
-                let local = match specifier {
-                    ImportSpecifier::Named(named) => &named.local,
-                    ImportSpecifier::Default(default) => &default.local,
-                    ImportSpecifier::Namespace(namespace) => &namespace.local,
-                };
-                match seen.get(local.sym.as_str()) {
-                    Some(other) if *other != item => {
-                        return Err(InvalidConfig::ConflictingImport {
-                            name: local.sym.to_string(),
-                        })
-                    }
-                    _ => {
-                        seen.insert(local.sym.to_string(), item);
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
+fn insert_import(
+    parsed_module: &mut Module,
+    target_module: &str,
+    target_specifier: &str,
+    local: &Ident,
+) {
+    parsed_module.body.insert(
+        0,
+        ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
+            span: Default::default(),
+            specifiers: vec![ImportSpecifier::Named(ImportNamedSpecifier {
+                span: Default::default(),
+                local: local.clone(),
+                imported: Some(ModuleExportName::Ident(Ident::new_no_ctxt(
+                    target_specifier.into(),
+                    Default::default(),
+                ))),
+                is_type_only: false,
+            })],
+            src: Box::new(target_module.into()),
+            type_only: false,
+            with: None,
+            phase: Default::default(),
+        })),
+    );
 }
 
 #[cfg(test)]
@@ -652,26 +600,10 @@ extra line break
 }
 
 #[cfg(test)]
-fn configured(tags: &[&str], output: Vec<(&str, Output)>) -> Result<Preprocessor, InvalidConfig> {
+fn configured(tags: &[&str]) -> Result<Preprocessor, InvalidConfig> {
     Preprocessor::with_config(Config {
         parser: Some(Box::new(TagNames::new(tags.iter().copied()))),
-        output: Some(
-            output
-                .into_iter()
-                .map(|(tag, output)| (tag.to_owned(), output))
-                .collect(),
-        ),
     })
-}
-
-#[test]
-fn custom_tag_name() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &configured(&["jsx"], vec![("jsx", Output::ember())]).unwrap(),
-        r#"let x = <jsx>hello</jsx>"#,
-        r#"import { template as template_UUID } from "@ember/template-compiler";
-           let x = template_UUID(`hello`, { eval() { return eval(arguments[0])} });"#,
-    )
 }
 
 // Ends each content tag at its last closing tag in the file.
@@ -696,7 +628,6 @@ fn parser_decides_where_the_content_ends() -> Result<(), swc_ecma_parser::error:
     test_helpers::testcase_with(
         &Preprocessor::with_config(Config {
             parser: Some(Box::new(LastClosingTag(vec!["template".into()]))),
-            output: None,
         })
         .unwrap(),
         r#"let x = <template><template id="row">hi</template></template>"#,
@@ -714,7 +645,7 @@ fn default_config_is_valid() {
 #[test]
 fn accepts_valid_tag_names() {
     for tag in ["template", "jsx", "my-tag", "h1", "Template"] {
-        assert_eq!(configured(&[tag], vec![]).unwrap().tags(), [tag]);
+        assert_eq!(configured(&[tag]).unwrap().tags(), [tag]);
     }
 }
 
@@ -732,276 +663,21 @@ fn rejects_invalid_tag_names() {
         "tëmplate",
     ] {
         assert_eq!(
-            configured(&[tag], vec![]).err(),
+            configured(&[tag]).err(),
             Some(InvalidConfig::InvalidTagName(tag.to_owned())),
             "{tag:?} should be rejected"
         );
     }
 }
 
-#[cfg(test)]
-fn custom_output(import: &str, expression: &str, class_member: Option<&str>) -> Output {
-    Output {
-        import: import.into(),
-        expression: expression.into(),
-        class_member: class_member.map(Into::into),
-        strip_indent: true,
-        export_default: true,
-    }
-}
-
-#[cfg(test)]
-fn jsx_preprocessor(output: &Output) -> Preprocessor {
-    configured(&["jsx"], vec![("jsx", output.clone())]).unwrap()
-}
-
-#[test]
-fn custom_output_replaces_expressions_and_class_members(
-) -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            r#"import compiler from "thing";"#,
-            "compiler(`___CT_CONTENT___`)",
-            Some("static template = compiler(`___CT_CONTENT___`);"),
-        )),
-        r#"let x = <jsx>hi</jsx>;
-           class A { <jsx>yo</jsx> }"#,
-        r#"import compiler_UUID from "thing";
-           let x = compiler_UUID(`hi`);
-           class A { static template = compiler_UUID(`yo`); }"#,
-    )
-}
-
-#[test]
-fn custom_output_class_member_defaults_to_a_static_block(
-) -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            r#"import compiler from "thing";"#,
-            "compiler(`___CT_CONTENT___`)",
-            None,
-        )),
-        r#"class A { <jsx>yo</jsx> }"#,
-        r#"import compiler_UUID from "thing";
-           class A { static { compiler_UUID(`yo`); } }"#,
-    )
-}
-
-#[test]
-fn custom_output_renames_named_namespace_and_shorthand_imports(
-) -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            r#"import { compile, other as o } from "thing"; import * as ns from "ns";"#,
-            "compile(`___CT_CONTENT___`, { compile, o, ns, compileName: 'compile' })",
-            None,
-        )),
-        r#"let x = <jsx>hi</jsx>"#,
-        r#"import { compile as compile_UUID, other as o_UUID } from "thing";
-           import * as ns_UUID from "ns";
-           let x = compile_UUID(`hi`, { compile: compile_UUID, o: o_UUID, ns: ns_UUID, compileName: 'compile' });"#,
-    )
-}
-
-#[test]
-fn custom_output_does_not_clash_with_local_names() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            r#"import compiler from "thing";"#,
-            "compiler(`___CT_CONTENT___`)",
-            None,
-        )),
-        r#"import compiler from "other";
-           export default function (compiler) { return <jsx>hi</jsx>; }"#,
-        r#"import compiler_UUID from "thing";
-           import compiler from "other";
-           export default function (compiler) { return compiler_UUID(`hi`); }"#,
-    )
-}
-
-#[test]
-fn custom_output_with_an_empty_import() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            "",
-            "globalCompiler(`___CT_CONTENT___`)",
-            None,
-        )),
-        r#"let x = <jsx>hi</jsx>"#,
-        r#"let x = globalCompiler(`hi`);"#,
-    )
-}
-
-#[test]
-fn custom_output_import_is_only_added_when_there_are_content_tags(
-) -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            r#"import compiler from "thing";"#,
-            "compiler(`___CT_CONTENT___`)",
-            None,
-        )),
-        r#"let x = 1;"#,
-        r#"let x = 1;"#,
-    )
-}
-
-#[test]
-fn custom_output_without_strip_indent() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&Output {
-            strip_indent: false,
-            ..custom_output("", "c(`___CT_CONTENT___`)", None)
-        }),
-        "let x = <jsx>\n    hi\n  </jsx>",
-        "let x = c(`\n    hi\n  `);",
-    )
-}
-
-#[test]
-fn custom_output_without_export_default() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&Output {
-            export_default: false,
-            ..custom_output("", "c(`___CT_CONTENT___`)", None)
-        }),
-        r#"<jsx>hi</jsx>"#,
-        r#"c(`hi`);"#,
-    )
-}
-
-#[test]
-fn ember_output_with_export_default() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &configured(&["template"], vec![("template", Output::ember())]).unwrap(),
-        r#"<template>hi</template>"#,
-        r#"import { template as template_UUID } from "@ember/template-compiler";
-           export default template_UUID(`hi`, { eval() { return eval(arguments[0])} });"#,
-    )
-}
-
-#[test]
-fn rejects_invalid_output() {
-    let err = configured(
-        &["template"],
-        vec![(
-            "template",
-            custom_output("", "(___CT_CONTENT___) => 1", None),
-        )],
-    )
-    .err();
-    match err {
-        Some(InvalidConfig::InvalidOutput { tag, error }) => {
-            assert_eq!(tag, "template");
-            assert_eq!(error.option, "expression");
-        }
-        other => panic!("expected an invalid output, got {other:?}"),
-    }
-}
-
 #[test]
 fn rejects_a_parser_with_no_tags() {
-    assert_eq!(configured(&[], vec![]).err(), Some(InvalidConfig::NoTags));
+    assert_eq!(configured(&[]).err(), Some(InvalidConfig::NoTags));
 }
 
 #[test]
-fn rejects_output_for_a_tag_the_parser_does_not_read() {
-    assert_eq!(
-        configured(&["template"], vec![("style", Output::ember())]).err(),
-        Some(InvalidConfig::OutputForUnknownTag("style".into()))
-    );
-}
-
-#[test]
-fn several_tags_with_their_own_output() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &configured(
-            &["template", "style"],
-            vec![
-                ("template", Output::ember()),
-                (
-                    "style",
-                    custom_output(
-                        r#"import css from "css";"#,
-                        "css(\"___CT_CONTENT___\")",
-                        Some(""),
-                    ),
-                ),
-            ],
-        )
-        .unwrap(),
-        r#"let t = <template>hi</template>;
-           let s = <style>p {}</style>;"#,
-        r#"import { template as template_UUID } from "@ember/template-compiler";
-           import css_UUID from "css";
-           let t = template_UUID(`hi`, { eval() { return eval(arguments[0])} });
-           let s = css_UUID("p {}");"#,
-    )
-}
-
-#[test]
-fn only_the_imports_of_tags_in_the_file_are_added() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &configured(
-            &["template", "style"],
-            vec![
-                ("template", Output::ember()),
-                (
-                    "style",
-                    custom_output(r#"import css from "css";"#, "css(`___CT_CONTENT___`)", None),
-                ),
-            ],
-        )
-        .unwrap(),
-        r#"let s = <style>p {}</style>;"#,
-        r#"import css_UUID from "css";
-           let s = css_UUID(`p {}`);"#,
-    )
-}
-
-#[test]
-fn a_shared_import_is_added_once() -> Result<(), swc_ecma_parser::error::Error> {
-    let output = custom_output(r#"import c from "c";"#, "c(`___CT_CONTENT___`)", None);
-    test_helpers::testcase_with(
-        &configured(
-            &["template", "style"],
-            vec![("template", output.clone()), ("style", output)],
-        )
-        .unwrap(),
-        r#"let t = <template>a</template>;
-           let s = <style>b</style>;"#,
-        r#"import c_UUID from "c";
-           let t = c_UUID(`a`);
-           let s = c_UUID(`b`);"#,
-    )
-}
-
-#[test]
-fn rejects_outputs_that_import_different_things_with_the_same_name() {
-    assert_eq!(
-        configured(
-            &["template", "style"],
-            vec![
-                (
-                    "template",
-                    custom_output(r#"import c from "a";"#, "c(`___CT_CONTENT___`)", None)
-                ),
-                (
-                    "style",
-                    custom_output(r#"import c from "b";"#, "c(`___CT_CONTENT___`)", None)
-                ),
-            ],
-        )
-        .err(),
-        Some(InvalidConfig::ConflictingImport {
-            name: "c_fd9b2463e5f141cfb5666b64daa1f11a".into()
-        })
-    );
-}
-
-#[test]
-fn a_tag_with_no_output_is_an_error_in_process() {
-    let p = configured(&["template", "style"], vec![("template", Output::ember())]).unwrap();
+fn only_template_has_a_built_in_output() {
+    let p = configured(&["template", "style"]).unwrap();
     let err = p
         .process("let s = <style>p {}</style>;", Default::default())
         .err()
@@ -1009,114 +685,28 @@ fn a_tag_with_no_output_is_an_error_in_process() {
     assert_eq!(
         err.error.kind(),
         &swc_ecma_parser::error::SyntaxError::ContentTag(
-            "There is no output for `<style>` content tags".into()
+            "`<style>` content tags have no built-in output, so they need a transform".into()
         )
     );
+    // In a class body too.
+    assert!(p
+        .process("class A { <style>p {}</style> }", Default::default())
+        .is_err());
+    // The other tag is still replaced.
+    assert!(p
+        .process("let t = <template>hi</template>;", Default::default())
+        .unwrap()
+        .code
+        .contains("@ember/template-compiler"));
 }
 
 #[test]
 fn a_tag_with_no_output_can_still_be_parsed() {
-    let p = configured(&["template", "style"], vec![]).unwrap();
+    let p = configured(&["template", "style"]).unwrap();
     let parsed = p
         .parse("let s = <style>p {}</style>;", Default::default())
         .unwrap();
     assert_eq!(parsed.len(), 1);
-}
-
-#[test]
-fn custom_output_with_a_string_placeholder() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            "",
-            r#"c("___CT_CONTENT___", '___CT_CONTENT___')"#,
-            None,
-        )),
-        r#"let x = <jsx>say "hi"
-</jsx>"#,
-        r#"let x = c('say "hi"\n', 'say "hi"\n');"#,
-    )
-}
-
-#[test]
-fn custom_output_with_a_code_placeholder() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            "",
-            "c(___CT_CONTENT___)",
-            Some("static x = c(___CT_CONTENT___);"),
-        )),
-        r#"let x = <jsx>{ a: 1 } // a comment</jsx>;
-           class A { <jsx>b + 1</jsx> }"#,
-        r#"let x = c({ a: 1 } // a comment
-           );
-           class A { static x = c(b + 1); }"#,
-    )
-}
-
-#[test]
-fn custom_output_code_can_contain_content_tags() -> Result<(), swc_ecma_parser::error::Error> {
-    // The default parser would end the outer tag at the inner closing tag.
-    test_helpers::testcase_with(
-        &Preprocessor::with_config(Config {
-            parser: Some(Box::new(LastClosingTag(vec!["jsx".into()]))),
-            output: Some(vec![(
-                "jsx".into(),
-                custom_output("", "c(___CT_CONTENT___, `___CT_CONTENT___`)", None),
-            )]),
-        })
-        .unwrap(),
-        r#"let x = <jsx>[<jsx>inner</jsx>]</jsx>;"#,
-        r#"let x = c([c(inner, `inner`)], `[<jsx>inner</jsx>]`);"#,
-    )
-}
-
-#[test]
-fn custom_output_code_that_does_not_parse_is_an_error() {
-    let p = jsx_preprocessor(&custom_output("", "c(___CT_CONTENT___)", None));
-    let src = "let x = 1;\nlet y = <jsx>a b</jsx>;";
-    let err = p.process(src, Default::default()).err().unwrap();
-    // The error points at `b`, inside the content tag.
-    let b = src.find("b<").unwrap() as u32;
-    assert_eq!(
-        swc_common::Spanned::span(&err.error).lo,
-        swc_common::BytePos(b + 1)
-    );
-}
-
-#[test]
-fn custom_output_code_with_more_than_one_statement_is_an_error() {
-    let p = jsx_preprocessor(&custom_output("", "c(___CT_CONTENT___)", None));
-    let err = p
-        .process("let y = <jsx>a); (b</jsx>;", Default::default())
-        .err()
-        .unwrap();
-    assert!(matches!(
-        err.error.kind(),
-        swc_ecma_parser::error::SyntaxError::Unexpected { .. }
-    ));
-}
-
-#[test]
-fn custom_output_with_an_empty_class_member_removes_the_tag(
-) -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output(
-            r#"import compiler from "thing";"#,
-            "compiler(`___CT_CONTENT___`)",
-            Some(""),
-        )),
-        r#"class A { a = 1; <jsx>gone</jsx> b = 2; }"#,
-        r#"class A { a = 1; b = 2; }"#,
-    )
-}
-
-#[test]
-fn custom_output_without_a_placeholder() -> Result<(), swc_ecma_parser::error::Error> {
-    test_helpers::testcase_with(
-        &jsx_preprocessor(&custom_output("", "undefined", None)),
-        r#"let x = <jsx>dropped</jsx>;"#,
-        r#"let x = undefined;"#,
-    )
 }
 
 #[test]
@@ -1234,7 +824,6 @@ mod recovery_tests {
     fn uses_the_parser_to_find_where_content_ends() {
         let p = Preprocessor::with_config(Config {
             parser: Some(Box::new(LastClosingTag(vec!["template".into()]))),
-            output: None,
         })
         .unwrap();
         let src = "let x = <template><template>a</template></template>;\nconst a =;";

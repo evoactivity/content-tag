@@ -7,20 +7,21 @@ const contents = (parsed) => parsed.map((o) => [o.tagName, o.contents]);
 
 // Ends each content tag at its last closing tag in the source.
 const lastClosingTag = {
-  tags: ["template"],
-  findEnd(source, openTag) {
-    return source.lastIndexOf(`</${openTag.name}>`);
+  template: {
+    findEnd(source, openTag) {
+      return source.lastIndexOf(`</${openTag.name}>`);
+    },
   },
 };
 
-describe("parser option", function () {
+describe("tags option: reading tags", function () {
   it("reads <template> when no options are given", function () {
     const output = new Preprocessor().parse("<template>hi</template>");
     expect(contents(output)).to.eql([["template", "hi"]]);
   });
 
-  it("reads the tags the parser lists", function () {
-    const p = new Preprocessor({ parser: { tags: ["template", "style"] } });
+  it("reads the tags that are listed", function () {
+    const p = new Preprocessor({ tags: { template: {}, style: {} } });
     const output = p.parse(
       "let a = <template>x</template>; let b = <style>y</style>;",
     );
@@ -30,8 +31,8 @@ describe("parser option", function () {
     ]);
   });
 
-  it("does not read tags the parser does not list", function () {
-    const p = new Preprocessor({ parser: { tags: ["jsx"] } });
+  it("does not read tags that are not listed", function () {
+    const p = new Preprocessor({ tags: { jsx: {} } });
     let output;
     try {
       output = p.parse("let x = <template>hi</template>");
@@ -49,7 +50,7 @@ describe("parser option", function () {
   });
 
   it("lets findEnd decide where the content ends", function () {
-    const p = new Preprocessor({ parser: lastClosingTag });
+    const p = new Preprocessor({ tags: lastClosingTag });
     const output = p.parse(
       `class A { <template><template id="row">a</template></template> }`,
     );
@@ -61,11 +62,12 @@ describe("parser option", function () {
   it("gives findEnd the source and the open tag in UTF-16 indexes", function () {
     const calls = [];
     const p = new Preprocessor({
-      parser: {
-        tags: ["template"],
-        findEnd(source, openTag) {
-          calls.push([source, { ...openTag }]);
-          return source.indexOf("</template>", openTag.contentStart);
+      tags: {
+        template: {
+          findEnd(source, openTag) {
+            calls.push([source, { ...openTag }]);
+            return source.indexOf("</template>", openTag.contentStart);
+          },
         },
       },
     });
@@ -80,7 +82,7 @@ describe("parser option", function () {
   });
 
   it("uses findEnd in process too", function () {
-    const p = new Preprocessor({ parser: lastClosingTag });
+    const p = new Preprocessor({ tags: lastClosingTag });
     const output = p.process(
       "let x = <template><template>a</template></template>",
     );
@@ -89,12 +91,13 @@ describe("parser option", function () {
 
   it("reports an error thrown by findEnd at its offset", function () {
     const p = new Preprocessor({
-      parser: {
-        tags: ["template"],
-        findEnd() {
-          throw Object.assign(new Error("This comment is not closed"), {
-            offset: 12,
-          });
+      tags: {
+        template: {
+          findEnd() {
+            throw Object.assign(new Error("This comment is not closed"), {
+              offset: 12,
+            });
+          },
         },
       },
     });
@@ -110,10 +113,11 @@ describe("parser option", function () {
 
   it("reports an error thrown by findEnd without an offset", function () {
     const p = new Preprocessor({
-      parser: {
-        tags: ["template"],
-        findEnd() {
-          throw new Error("nope");
+      tags: {
+        template: {
+          findEnd() {
+            throw new Error("nope");
+          },
         },
       },
     });
@@ -128,7 +132,7 @@ describe("parser option", function () {
   it("rejects a findEnd result that is not a closing tag", function () {
     for (const result of [3, -1, 1.5, "11", 1000]) {
       const p = new Preprocessor({
-        parser: { tags: ["template"], findEnd: () => result },
+        tags: { template: { findEnd: () => result } },
       });
       expect(
         () => p.parse("<template>a</template>"),
@@ -137,26 +141,23 @@ describe("parser option", function () {
     }
   });
 
-  it("throws for invalid parser options", function () {
-    expect(() => new Preprocessor({ parser: "x" })).to.throw(
+  it("throws for invalid tags options", function () {
+    expect(() => new Preprocessor({ tags: "x" })).to.throw(
       TypeError,
-      /`parser` option must be an object/,
+      /`tags` option must be an object/,
     );
-    expect(() => new Preprocessor({ parser: {} })).to.throw(
+    expect(() => new Preprocessor({ tags: { template: 1 } })).to.throw(
       TypeError,
-      /`parser.tags` option must be an array of strings/,
+      /`tags.template` option must be an object/,
     );
-    expect(() => new Preprocessor({ parser: { tags: [1] } })).to.throw(
+    expect(() => new Preprocessor({ tags: { a: { findEnd: 1 } } })).to.throw(
       TypeError,
-      /`parser.tags` option must be an array of strings/,
+      /`tags.a.findEnd` option must be a function/,
     );
-    expect(
-      () => new Preprocessor({ parser: { tags: ["a"], findEnd: 1 } }),
-    ).to.throw(TypeError, /`parser.findEnd` option must be a function/);
-    expect(() => new Preprocessor({ parser: { tags: [] } })).to.throw(
+    expect(() => new Preprocessor({ tags: {} })).to.throw(
       /must list at least one tag/,
     );
-    expect(() => new Preprocessor({ parser: { tags: ["my tag"] } })).to.throw(
+    expect(() => new Preprocessor({ tags: { "my tag": {} } })).to.throw(
       /Invalid content tag name "my tag"/,
     );
   });

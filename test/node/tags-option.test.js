@@ -240,9 +240,6 @@ describe("tags option", function () {
 
   it("rejects options that do not fit together", function () {
     expect(
-      () => new Preprocessor({ tags: {}, parser: { tags: ["template"] } }),
-    ).to.throw(TypeError, /cannot be used with/);
-    expect(
       () =>
         new Preprocessor({
           tags: { template: { transform: mark }, style: {} },

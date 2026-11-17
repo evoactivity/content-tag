@@ -57,10 +57,11 @@ describe("parseWithRecovery", function () {
 
   it("uses findEnd in a broken file", function () {
     const p = new Preprocessor({
-      parser: {
-        tags: ["template"],
-        findEnd(source, openTag) {
-          return source.lastIndexOf(`</${openTag.name}>`);
+      tags: {
+        template: {
+          findEnd(source, openTag) {
+            return source.lastIndexOf(`</${openTag.name}>`);
+          },
         },
       },
     });
@@ -74,10 +75,11 @@ describe("parseWithRecovery", function () {
 
   it("falls back to the first closing tag when findEnd throws", function () {
     const p = new Preprocessor({
-      parser: {
-        tags: ["template"],
-        findEnd() {
-          throw new Error("cannot find the end");
+      tags: {
+        template: {
+          findEnd() {
+            throw new Error("cannot find the end");
+          },
         },
       },
     });
@@ -96,12 +98,13 @@ describe("parseWithRecovery", function () {
     expect(syntax.errors.map((e) => e.kind)).to.eql(["syntax"]);
 
     const content = new Preprocessor({
-      parser: {
-        tags: ["template"],
-        findEnd() {
-          throw Object.assign(new Error("This comment is not closed"), {
-            offset: 12,
-          });
+      tags: {
+        template: {
+          findEnd() {
+            throw Object.assign(new Error("This comment is not closed"), {
+              offset: 12,
+            });
+          },
         },
       },
     }).parseWithRecovery("x = <template>a</template>;");
@@ -130,16 +133,17 @@ describe("parseWithRecovery", function () {
 
     // A `findEnd` reports it with a `code`. Its `offset` is not used.
     const p = new Preprocessor({
-      parser: {
-        tags: ["template"],
-        findEnd() {
-          throw Object.assign(
-            new Error("The closing `</template>` tag is missing"),
-            {
-              code: "missing-closing-tag",
-              offset: 0,
-            },
-          );
+      tags: {
+        template: {
+          findEnd() {
+            throw Object.assign(
+              new Error("The closing `</template>` tag is missing"),
+              {
+                code: "missing-closing-tag",
+                offset: 0,
+              },
+            );
+          },
         },
       },
     });
