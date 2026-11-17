@@ -259,6 +259,13 @@ impl ContentTagParser for JsParser {
                     .ok()
                     .and_then(|message| message.as_string())
                     .unwrap_or_else(|| js_string(&err));
+                let missing_closing_tag = Reflect::get(&err, &"code".into())
+                    .ok()
+                    .and_then(|code| code.as_string())
+                    .is_some_and(|code| code == "missing-closing-tag");
+                if missing_closing_tag {
+                    return Err(ContentTagError::missing_closing_tag(message));
+                }
                 let offset = Reflect::get(&err, &"offset".into())
                     .ok()
                     .and_then(|offset| offset.as_f64())

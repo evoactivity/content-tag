@@ -33,7 +33,16 @@ interface Recovered {
 }
 
 interface RecoveryError {
+  /**
+   * - `"syntax"`: the code outside the content tags does not parse.
+   * - `"missing-closing-tag"`: a content tag has no closing tag. Its end is
+   *   then a guess, or the tag is not in `templates` at all.
+   * - `"tag-content"`: `findEnd` could not read the content of a tag, such as
+   *   a comment in it that is not closed. The tag still ends at a closing tag.
+   */
+  kind: "syntax" | "missing-closing-tag" | "tag-content";
   message: string;
+  /** For `"missing-closing-tag"`, the opening tag. */
   range: Range;
 }
 
@@ -67,7 +76,8 @@ interface ContentTagParser {
    * Default is the first closing tag after the content starts.
    *
    * To report an error, throw an `Error`. If it has a numeric `offset`, the
-   * error is reported at that index.
+   * error is reported at that index. If its `code` is
+   * `"missing-closing-tag"`, the error is reported on the opening tag.
    */
   findEnd?(source: string, openTag: OpenTag): number;
 }

@@ -125,7 +125,8 @@ let p = new Preprocessor({
 - `findEnd` must return the index of a closing tag with the open tag's name,
   at or after `contentStart`. Anything else is a parse error.
 - To report an error, throw an `Error`. If it has a numeric `offset`, the
-  parse error points at that index.
+  parse error points at that index. If its `code` is `"missing-closing-tag"`,
+  the parse error points at the opening tag.
 - One preprocessor uses one parser. A parser can list several tags.
 
 #### Custom output
@@ -223,16 +224,31 @@ let { templates, errors } = p.parseWithRecovery(
   "const T = <template>Hi</template>;\nconst a =;",
 );
 // templates: one `Parsed`, for "Hi"
-// errors: [{ message, range }] for the syntax error
+// errors: [{ kind: "syntax", message, range }] for the syntax error
 ```
 
 ```ts
 interface Recovered {
   templates: Parsed[];
   /** Empty when the file parsed. The parse error comes first. */
-  errors: { message: string; range: Range }[];
+  errors: {
+    kind: "syntax" | "missing-closing-tag" | "tag-content";
+    message: string;
+    range: Range;
+  }[];
 }
 ```
+
+Each error has a `kind`:
+
+- `"syntax"` means the code outside the content tags does not parse.
+- `"missing-closing-tag"` means a content tag has no closing tag. Its `range`
+  is the opening tag. The tag then ends at the first closing tag after it,
+  which belongs to another tag, or it is left out of `templates` when there
+  is none.
+- `"tag-content"` means `findEnd` could not read the content of a tag, such
+  as a comment in it that is not closed. The tag ends at its first closing
+  tag.
 
 When the file parses, `templates` is the same as `parse` gives. When it does
 not, swc's parser gives no syntax tree, so the content tags are found with

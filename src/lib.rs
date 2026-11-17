@@ -74,8 +74,42 @@ pub struct Recovered {
 /// An error found by [Preprocessor::parse_with_recovery].
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct RecoveryError {
+    pub kind: RecoveryErrorKind,
     pub message: String,
+    /// For [RecoveryErrorKind::MissingClosingTag], the opening tag.
     pub range: locate::Range,
+}
+
+/// What a [RecoveryError] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryErrorKind {
+    /// The JavaScript or TypeScript outside the content tags does not parse.
+    Syntax,
+    /// A content tag has no closing tag. Its end is then a guess, or the tag
+    /// is not in `templates` at all.
+    MissingClosingTag,
+    /// The parser could not read the content of a content tag, such as a
+    /// comment in it that is not closed. The tag still ends at a closing tag.
+    TagContent,
+}
+
+impl RecoveryError {
+    fn new(error: &swc_ecma_parser::error::Error, range: locate::Range) -> Self {
+        use swc_ecma_parser::error::SyntaxError;
+        let kind = match error.kind() {
+            SyntaxError::ContentTagNotClosed(_) => RecoveryErrorKind::MissingClosingTag,
+            SyntaxError::ContentTag(_) | SyntaxError::ContentEndIsNotClosingTag { .. } => {
+                RecoveryErrorKind::TagContent
+            }
+            _ => RecoveryErrorKind::Syntax,
+        };
+        Self {
+            kind,
+            message: error.kind().msg().into_owned(),
+            range,
+        }
+    }
 }
 
 /// The settings for [Preprocessor::with_config].
@@ -305,10 +339,10 @@ impl Preprocessor {
             let end = source_map.lookup_byte_offset(span.hi).pos.0 as usize;
             locate::Range::from_offsets(src, start.min(src.len()), end.min(src.len()), is_ascii)
         };
-        let mut errors = vec![RecoveryError {
-            message: parse_error.error.kind().msg().into_owned(),
-            range: error_range(&parse_error.source_map, parse_error.error.span()),
-        }];
+        let mut errors = vec![RecoveryError::new(
+            &parse_error.error,
+            error_range(&parse_error.source_map, parse_error.error.span()),
+        )];
 
         let source_map: Lrc<SourceMap> = Default::default();
         let source_file = new_source_file(&source_map, src, None);
@@ -323,10 +357,7 @@ impl Preprocessor {
             )
         });
         for error in scan.errors {
-            let error = RecoveryError {
-                message: error.kind().msg().into_owned(),
-                range: error_range(&source_map, error.span()),
-            };
+            let error = RecoveryError::new(&error, error_range(&source_map, error.span()));
             if !errors.contains(&error) {
                 errors.push(error);
             }
@@ -1149,7 +1180,19 @@ mod recovery_tests {
         );
         // The parse error points at the `;` after `=`.
         let error = &recovered.errors[0];
+        assert_eq!(error.kind, RecoveryErrorKind::Syntax);
         assert_eq!(error.range.start_byte(), src.find("=;").unwrap() + 1);
+    }
+
+    #[test]
+    fn a_missing_closing_tag_is_reported_on_the_opening_tag() {
+        let p = Preprocessor::new();
+        let src = "let x = <template>a;\n";
+        let recovered = p.parse_with_recovery(src, Default::default());
+        assert!(recovered.templates.is_empty());
+        let error = &recovered.errors[0];
+        assert_eq!(error.kind, RecoveryErrorKind::MissingClosingTag);
+        assert_eq!(error.range.start_byte(), src.find("<template>").unwrap());
     }
 
     #[test]

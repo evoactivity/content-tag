@@ -87,4 +87,62 @@ describe("parseWithRecovery", function () {
       "cannot find the end",
     );
   });
+
+  it("says what kind each error is", function () {
+    const p = new Preprocessor();
+    const syntax = p.parseWithRecovery(
+      "const T = <template>a</template>;\nconst a =;",
+    );
+    expect(syntax.errors.map((e) => e.kind)).to.eql(["syntax"]);
+
+    const content = new Preprocessor({
+      parser: {
+        tags: ["template"],
+        findEnd() {
+          throw Object.assign(new Error("This comment is not closed"), {
+            offset: 12,
+          });
+        },
+      },
+    }).parseWithRecovery("x = <template>a</template>;");
+    expect(
+      content.errors.map((e) => [e.kind, e.range.startUtf16Codepoint]),
+    ).to.eql([["tag-content", 12]]);
+  });
+
+  it("reports a missing closing tag on the opening tag", function () {
+    const src = "let ü = 1;\nconst T = <template>a;\n";
+    const expected = [
+      {
+        kind: "missing-closing-tag",
+        message: "The closing `</template>` tag is missing",
+        open: "<template>",
+      },
+    ];
+    const errors = (recovered) =>
+      recovered.errors.map((e) => ({
+        kind: e.kind,
+        message: e.message,
+        open: src.slice(e.range.startUtf16Codepoint, e.range.endUtf16Codepoint),
+      }));
+
+    expect(errors(new Preprocessor().parseWithRecovery(src))).to.eql(expected);
+
+    // A `findEnd` reports it with a `code`. Its `offset` is not used.
+    const p = new Preprocessor({
+      parser: {
+        tags: ["template"],
+        findEnd() {
+          throw Object.assign(
+            new Error("The closing `</template>` tag is missing"),
+            {
+              code: "missing-closing-tag",
+              offset: 0,
+            },
+          );
+        },
+      },
+    });
+    expect(errors(p.parseWithRecovery(src))).to.eql(expected);
+  });
 });

@@ -56,7 +56,7 @@ describe(`process`, function () {
     expect(function () {
       p.process(`const thing = "face";
   <template>Hi`);
-    }).to.throw(`Parse Error at <anon>:2:15: 2:15`);
+    }).to.throw(`Parse Error at <anon>:2:3: 2:13`);
   });
 
   it("Emits parse errors with real file", function () {
@@ -66,7 +66,7 @@ describe(`process`, function () {
   <template>Hi`,
         { filename: "path/to/my/component.gjs" },
       );
-    }).to.throw(`Parse Error at path/to/my/component.gjs:2:15: 2:15`);
+    }).to.throw(`Parse Error at path/to/my/component.gjs:2:3: 2:13`);
   });
 
   it("Offers source_code snippet on parse errors", function () {

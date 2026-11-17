@@ -255,7 +255,7 @@ describe(`parse`, function () {
   <template>Hi`,
         { filename: "path/to/my/component.gjs" },
       );
-    }).to.throw(`Parse Error at path/to/my/component.gjs:2:15: 2:15`);
+    }).to.throw(`Parse Error at path/to/my/component.gjs:2:3: 2:13`);
   });
 
   it("handles multibyte characters", function () {
