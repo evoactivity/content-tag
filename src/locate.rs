@@ -127,21 +127,35 @@ pub fn scanned_occurrence(src: &str, tag: &ScannedContentTag, is_ascii: bool) ->
     }
 }
 
-#[cfg(test)]
 impl Occurrence {
+    /// The tag's name, such as `template`.
     pub fn tag_name(&self) -> &str {
         &self.tag_name
     }
 
+    /// The text between the opening and closing tags.
     pub fn contents(&self) -> &str {
         &self.contents
     }
+
+    /// Whether the tag is directly inside a class body.
+    pub fn is_class_member(&self) -> bool {
+        self.kind == ContentTagKind::ClassMember
+    }
+
+    /// The byte offsets where the whole tag starts and ends.
+    pub fn byte_range(&self) -> (usize, usize) {
+        (self.range.start_byte, self.range.end_byte)
+    }
 }
 
-#[cfg(test)]
 impl Range {
     pub fn start_byte(&self) -> usize {
         self.start_byte
+    }
+
+    pub fn end_byte(&self) -> usize {
+        self.end_byte
     }
 }
 

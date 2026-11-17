@@ -190,6 +190,53 @@ output: {
 }
 ```
 
+#### Tags
+
+`tags` lists the content tags by name. Each one can have a `findEnd`, as
+described under Parser, and a `transform`. It cannot be used with `parser` or
+`output`.
+
+```js
+const p = new Preprocessor({
+  tags: {
+    template: {
+      findEnd(source, openTag) {
+        return source.indexOf(`</${openTag.name}>`, openTag.contentStart);
+      },
+      transform(tag, context) {
+        const template = context.import("template", "@ember/template-compiler");
+        return `${template}(${JSON.stringify(tag.contents)})`;
+      },
+    },
+  },
+});
+
+p.process("export const Hi = <template>Hi</template>;");
+// code:
+// import { template as template_fd9b… } from "@ember/template-compiler";
+// export const Hi = template_fd9b…("Hi");
+```
+
+`transform` is given the tag as `parse` returns it, and returns the code that
+replaces it. Use `tag.type` to return a class member for a tag in a class
+body.
+
+- `process` copies the rest of the source as it is. It does not parse or print
+  the code that a `transform` returns.
+- `context.import(name, from)` adds `import { name } from "from"` to the top of
+  the file, once, and returns the local name to use. The local name has a
+  suffix so it cannot clash with a name in the file. A `name` of `"default"`
+  is the default export. A file with no content tags gets no imports.
+- When any tag has a `transform`, every tag needs one. With no `transform` at
+  all, `process` writes the Ember output for `template`.
+- `process` also returns `tags`, the tags it replaced with an `outputRange`
+  that says where each replacement is in `code`, and `errors`.
+- With the `recover` option, `process` does not throw for a syntax error. It
+  returns the error in `errors` and still replaces the tags, which it finds
+  without parsing the file, as `parseWithRecovery` does.
+- The source map has an entry for each word of the copied source. Each
+  replacement has one entry, which points at the start of its tag.
+
 ### `Preprocessor.process(src: string, options?: PreprocessorOptions): { code: string, map: string };`
 
 Parses a given source code string using the `content-tag` spec into standard
@@ -271,6 +318,12 @@ interface PreprocessorOptions {
   inline_source_map?: boolean;
 
   filename?: string;
+
+  /**
+   * Only for `process` with a `transform`. Return a syntax error in `errors`
+   * and do not throw. Default is `false`.
+   */
+  recover?: boolean;
 }
 ```
 

@@ -23,10 +23,13 @@ use swc_ecma_visit::{VisitMutWith, VisitWith};
 mod bindings;
 mod locate;
 mod output;
+mod splice;
 mod transform;
 
+pub use locate::Occurrence;
 use output::CompiledOutput;
 pub use output::{InvalidOutput, Output, CONTENT_PLACEHOLDER};
+pub use splice::{Imports, SpliceError, Spliced, SplicedTag};
 
 #[derive(Default)]
 pub struct Options {
@@ -457,16 +460,7 @@ fn print(
         .unwrap();
 
     if inline_source_map {
-        let mut comment = "//# sourceMappingURL=data:application/json;base64,"
-            .to_owned()
-            .into_bytes();
-        buf.append(&mut comment);
-
-        let mut encoded = general_purpose::URL_SAFE_NO_PAD
-            .encode(source_map_buffer.clone())
-            .into_bytes();
-
-        buf.append(&mut encoded);
+        buf.append(&mut encode_inline_source_map(&source_map_buffer).into_bytes());
     }
 
     let s = String::from_utf8_lossy(&buf);
@@ -475,6 +469,14 @@ fn print(
         code: s.to_string(),
         map: String::from_utf8(source_map_buffer.clone()).unwrap(),
     }
+}
+
+// The comment that holds a source map inside the code it is for.
+fn encode_inline_source_map(map: &[u8]) -> String {
+    format!(
+        "//# sourceMappingURL=data:application/json;base64,{}",
+        general_purpose::URL_SAFE_NO_PAD.encode(map)
+    )
 }
 
 // Two outputs may import the same declaration, which is then added once. But

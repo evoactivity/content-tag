@@ -48,6 +48,16 @@ interface RecoveryError {
 
 interface PreprocessorConstructorOptions {
   /**
+   * The content tags to read, by name, such as `{ template: {} }`. Each one
+   * can say where its content ends with `findEnd`, and what replaces it with
+   * `transform`. It cannot be used with `parser` or `output`.
+   *
+   * A name must start with an ASCII letter and contain only ASCII letters,
+   * digits and hyphens. The opening tag must be exactly `<name>`.
+   */
+  tags?: Record<string, TagOptions>;
+
+  /**
    * Which content tags to read, and where each one's content ends. Default
    * is `{ tags: ["template"] }`.
    */
@@ -60,6 +70,40 @@ interface PreprocessorConstructorOptions {
    * `process` throws when it reaches a tag with no output.
    */
   output?: Record<string, PreprocessorOutput>;
+}
+
+interface TagOptions {
+  /**
+   * Returns the index in `source` of the `<` of the tag that closes
+   * `openTag`. See `ContentTagParser.findEnd`. Default is the first closing
+   * tag after the content starts.
+   */
+  findEnd?(source: string, openTag: OpenTag): number;
+
+  /**
+   * Returns the code that `process` writes in place of the tag. The rest of
+   * the source is copied as it is, and the code is not parsed or printed
+   * again. When any tag has a `transform`, every tag needs one.
+   *
+   * Without a `transform` for any tag, `process` writes the Ember output for
+   * `template`.
+   */
+  transform?(tag: Parsed, context: TransformContext): string;
+}
+
+interface TransformContext {
+  /**
+   * Adds `import { name } from "from"` to the top of the file, once, and
+   * returns the local name to use for it. The local name cannot clash with a
+   * name in the file. A `name` of `"default"` is the default export.
+   */
+  import(name: string, from: string): string;
+}
+
+/** A content tag that a `transform` replaced. */
+interface Replaced extends Parsed {
+  /** Where the code that replaced the tag is in `code`. */
+  outputRange: Range;
 }
 
 interface ContentTagParser {
@@ -139,6 +183,13 @@ interface PreprocessorOptions {
   inline_source_map?: boolean;
 
   filename?: string;
+
+  /**
+   * Only for `process` with a `transform`. Do not throw for a syntax error.
+   * The error is returned in `errors`, and the content tags are found without
+   * parsing the file, as `parseWithRecovery` does. Default is `false`.
+   */
+  recover?: boolean;
 }
 
 /**
@@ -157,7 +208,14 @@ export class Preprocessor {
   process(
     src: string,
     options?: PreprocessorOptions,
-  ): { code: string; map: string };
+  ): {
+    code: string;
+    map: string;
+    /** With a `transform`, the content tags that were replaced. */
+    tags?: Replaced[];
+    /** With a `transform`, the errors in the source. Empty without `recover`. */
+    errors?: RecoveryError[];
+  };
   /**
    * @param {string} src
    * @param {PreprocessorOptions | undefined} options
