@@ -229,10 +229,13 @@ not, swc's parser gives no syntax tree, so the content tags are found with
 swc's lexer alone, using the same tags and `findEnd`. Those templates have
 the same ranges and contents, with two limits:
 
-- `type` is a guess. A content tag directly inside the body of a `class` is
-  reported as `"class-member"`, and any other as `"expression"`.
-- A regex in an unusual place, such as straight after a `}`, can be read as a
-  division, so its content is read as code.
+- `type` is a guess. A content tag is reported as `"class-member"` when it is
+  directly inside the body of a `class` and starts a member. It does not start
+  one after a token that needs a value, so the tag in `x = <template>` is an
+  `"expression"`, as is any other.
+- A regex in an unusual place can be read as a division, so its content is
+  read as code. One such place is straight after the block of a `case x:` or
+  a label.
 
 When `findEnd` throws or gives a bad index, the content tag ends at its first
 closing tag instead, and the error is added to `errors`.

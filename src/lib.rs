@@ -813,6 +813,37 @@ mod recovery_tests {
     }
 
     #[test]
+    fn recovery_finds_the_same_templates_as_parsing() {
+        let p = Preprocessor::new();
+        for valid in [
+            "class A { x = <template>a</template> }",
+            "class A {\n  x = 1\n  <template>a</template>\n  <template>b</template>\n}",
+            "class A { foo() { return <template>a</template>; } <template>b</template> }",
+            "class A extends mix({ a: 1 }) { <template>a</template> }",
+            "class A { x = f(<template>a</template>); y = [<template>b</template>] }",
+            "let o = { class: 1 };\nlet f = () => { return <template>a</template> };",
+            "let a = x! / 2; const T = <template>a</template>; let b = 1 / 2;",
+            "let a = i++ / 2; const T = <template>a</template>; let b = 1 / 2;",
+            "let a = o.if(b) / 2; const T = <template>a</template>; let b = 1 / 2;",
+            "let a = !/<template>no<\\/template>/.test(x); const T = <template>a</template>;",
+            "let a = `${/<template>no<\\/template>/.test(x)}`; const T = <template>a</template>;",
+            "if (x) /<template>no<\\/template>/.test(y); const T = <template>a</template>;",
+            "class A<T extends {}> { <template>a</template> }",
+            "class A extends B<C<{ a: 1 }>> { <template>a</template> }",
+            "if (x) { y() }\n/<template>no<\\/template>/.test(z); const T = <template>a</template>;",
+            "function f() {}\n/<template>no<\\/template>/.test(z); const T = <template>a</template>;",
+            "let a = { b: 1 } / 2; const T = <template>a</template>; let c = 1 / 2;",
+        ] {
+            let parsed = p.parse(valid, Default::default()).unwrap();
+            // A call that is still being typed, after everything else.
+            let broken = format!("{valid}\nfoo(");
+            let recovered = p.parse_with_recovery(&broken, Default::default());
+            assert!(!recovered.errors.is_empty(), "{valid}");
+            assert_eq!(recovered.templates, parsed, "{valid}");
+        }
+    }
+
+    #[test]
     fn ignores_templates_in_regexes_and_template_literals() {
         let p = Preprocessor::new();
         let src = "const r = /<template>no<\\/template>/;\nconst s = `${a}<template>no</template>`;\nconst T = <template>hi</template>;\nfoo(";
